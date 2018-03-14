@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def list_login(hostname):
+    import redis
+    rcli = redis.StrictRedis()
+    return rcli.smembers("proxmox:{hostname}".format(hostname=hostname))
+
+
+def future_args(*outargs, **outkwargs):
+    def ofunc(func, *args, **kwargs):
+        def nfunc(*args, **kwargs):
+            nargs = []
+            nkwargs = {}
+            for v in outargs:
+                nargs.append(v())
+            for k, v in outkwargs.items():
+                arg = v()
+                nkwargs.update({k: arg})
+            return func(*nargs, *args, **nkwargs, **kwargs)
+        return nfunc
+    return ofunc
+
+def print_result(method):
+    def ofunc(func, *args, **kwargs):
+        def nfunc(*args, **kwargs):
+            import importlib
+            import sys
+            result = func(*args, **kwargs)
+            importlib.import_module(method).dump(result, sys.stdout, indent=2)
+            print()
+            return result
+        return nfunc
+    return ofunc
+
+
+def remove_login(hostname, username):
+    import redis
+    rcli = redis.StrictRedis()
+    rcli.srem("proxmox:{hostname}".format(hostname=hostname), username)
+    rcli.delete("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username))
+    rcli.delete("proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username))
+
+
+def check_login(hostname, username):
+    import redis
+    rcli = redis.StrictRedis()
+
+    if (rcli.sismember("proxmox:{hostname}".format(hostname=hostname), username) and
+            rcli.get("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username)) and
+            rcli.get("proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username))):
+        return ((hostname, username),
+                rcli.get("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username)),
+                rcli.get(
+                    "proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username)))
+    else:
+        remove_login(hostname, username)
+    return False
+
+
+def has_login(hostname):
+    for login in list_login(hostname):
+        res = check_login(hostname, login.decode())
+        if not res:
+            remove_login(hostname, login)
+        else:
+            return res
+
+def delete(hostname, path, data=None, json=None, **kwargs):
+    import requests
+    if not hostname.startswith("https://"):
+        nhostname = "https://" + hostname
+    else:
+        nhostname = hostname
+    if nhostname.endswith("/"):
+        url = nhostname[:-1] + path
+    else:
+        url = nhostname + path
+    if "verify" not in kwargs:
+        kwargs.update({"verify": False})
+    return requests.delete(url, data=data, json=json, **kwargs)
+
+def post(hostname, path, data=None, json=None, **kwargs):
+    import requests
+    if not hostname.startswith("https://"):
+        nhostname = "https://" + hostname
+    else:
+        nhostname = hostname
+    if nhostname.endswith("/"):
+        url = nhostname[:-1] + path
+    else:
+        url = nhostname + path
+    if "verify" not in kwargs:
+        kwargs.update({"verify": False})
+    return requests.post(url, data=data, json=json, **kwargs)
+
+
+def get(hostname, path, data=None, **kwargs):
+    import requests
+    if not hostname.startswith("https://"):
+        nhostname = "https://" + hostname
+    else:
+        nhostname = hostname
+    if nhostname.endswith("/"):
+        url = nhostname[:-1] + path
+    else:
+        url = nhostname + path
+    if "verify" not in kwargs:
+        kwargs.update({"verify": False})
+    return requests.get(url, data=data, **kwargs)
+
+
+def login(hostname, username, realm="pve", **kwargs):
+    import redis
+    rcli = redis.StrictRedis()
+    if check_login(hostname, username):
+        password = rcli.get("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username))
+    else:
+        remove_login(hostname, username)
+        import getpass
+        password = getpass.getpass()
+    response = post(hostname, "/api2/extjs/access/ticket",
+                    data={"username": username, "password": password, "realm": realm})
+    data = response.json()
+    if response.status_code == 200 and data['success'] == 1:
+        rcli.sadd("proxmox:{hostname}".format(hostname=hostname), username)
+        rcli.setex("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username), 2 * 60 * 60,
+                   data['data']['ticket'])
+        rcli.setex("proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username),
+                   2 * 60 * 60, data['data']['CSRFPreventionToken'])
+        return response.json()
+    else:
+        raise Exception(data['message'])
+
+
+def resources(hostname, t=None,p=None):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/cluster/resources", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    result = [ item for item in data['data'] if ({("type", t)}.issubset(item.items()) or t is None) ]
+    if response.status_code == 200:
+        return result
+    else:
+        raise Exception(data + str(response.status_code) + response.request.url)
+
+
+def nextid(hostname):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/cluster/nextid", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return int(data['data'])
+
+def nodes(hostname):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/nodes", params=data, cookies=cookies, headers=headers)
+    data = response.json()
+    return data['data']
+
+def networks(hostname, node, nettype=None):
+    if not node:
+        return {node['id']: networks(hostname, node['node'], nettype) for node in nodes(hostname)}
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    if netttype is not None:
+        data.update({"type": nettype})
+    response = get(hostname, "/api2/json/nodes/{node}/network".format(node=node), params=data, cookies=cookies, headers=headers)
+    data = response.json()
+    return data['data']
+
+def storage(hostname, node, contenttype=None):
+    if not node:
+        return {node['id']: storage(hostname, node['node'], contenttype) for node in nodes(hostname)}
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    if contenttype is not None:
+        data.update({"content": contenttype})
+    response = get(hostname, "/api2/json/nodes/{node}/storage".format(node=node), params=data, cookies=cookies, headers=headers)
+    data = response.json()
+    return data['data']
+
+def content(hostname, node, storage, contenttype=None):
+    if not (node and storage):
+        raise Exception
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    if contenttype is not None:
+        data.update({"content": contenttype})
+    response = get(hostname, "/api2/json/nodes/{node}/storage/{storage}/content".format(node=node, storage=storage), params=data, cookies=cookies, headers=headers)
+    data = response.json()
+    return data['data']
+
+def lxc(hostname, vmid=None, node=None):
+    if not node:
+        return {node['id']: lxc(hostname, node['node']) for node in nodes(hostname)}
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data']
+
+def lxc_status(hostname, node, vmid, op):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    if op == "status":
+        response = get(hostname, "/api2/json/nodes/{node}/lxc/{vmid}/status/{op}".format(node=node, vmid=vmid, op=op), params=data, cookies=cookies, headers=headers)
+    else:
+        response = post(hostname, "/api2/json/nodes/{node}/lxc/{vmid}/status/{op}".format(node=node, vmid=vmid, op=op), data=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data'] if data else None
+
+def lxc_create(hostname, node, path, scale, wait=False):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    results = []
+    for seqid in range(1, 1+scale):
+        status = 0
+        vmid = nextid(hostname)
+        while not status:
+            if path.endswith(".yml") or path.endswith("yaml"):
+                import yaml
+                data = yaml.load(open(path).read().format(vmid=vmid, seqid=seqid))
+            response = post(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), data=data, cookies=cookies, headers=headers)
+            data = response.json()
+            if 'data' in data and data['data'] and data['data'].startswith("UPID:") or ('success' in data and data['success']):
+                status = 1
+            elif data['success'] == 0 and data['message'].find("already exists"):
+                print("vmid conflict")
+                vmid += 1
+            else:
+                status = -1
+        if status == 1:
+            results.append(response.json()['data'])
+            if wait:
+                wait_task(hostname, response.json()['data'])
+        else:
+            results.append(response.json()['message'])
+    return results
+
+def lxc_delete(hostname, node, vmid, wait=False):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    if get(hostname, "/api2/json/nodes/{node}/lxc/{vmid}".format(node=node, vmid=vmid), data=data, cookies=cookies, headers=headers).status_code != 200:
+        raise Exception("No such lxc vm")
+    response = delete(hostname, "/api2/json/nodes/{node}/lxc/{vmid}".format(node=node, vmid=vmid), data=data, cookies=cookies, headers=headers)
+    data = response.json()
+    if response.status_code >= 400:
+        raise Exception("http delete: {}".format(response.status_code))
+    if wait:
+        wait_task(hostname, data['data'])
+    return data['data']
+
+def tasks(hostname):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/cluster/tasks", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data']
+
+def wait_task(hostname, taskid, interval=1, progress=1):
+    finished = False
+    task = None
+    if progress:
+        print("waiting for task '{}' finish...".format(taskid), end="", flush=True)
+    while not finished:
+        task = [task for task in tasks(hostname) if task['upid'] == taskid][0]
+        if "endtime" in task:
+            finished = True
+        if not finished:
+            import time
+            time.sleep(interval)
+    if progress:
+        print(task['status'])
+
+
+def pools(hostname):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/pools", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data']
+
+def interactive_input(options):
+    """
+    """
+
+def parseargs():
+    import argparse
+    import functools
+
+    parser = argparse.ArgumentParser()
+    parser.set_defaults(func=parser.print_help)
+    parser.add_argument("-H", "--host")
+
+    subparsers = parser.add_subparsers()
+
+    login_subparser = subparsers.add_parser("login")
+    login_subparser.add_argument("username")
+    login_subparser.set_defaults(func=future_args(
+        hostname=lambda:parser.parse_args().host,
+        username=lambda:parser.parse_args().username,
+    )(login))
+
+    list_subparser = subparsers.add_parser("list")
+    list_subparser.add_argument("list_type", nargs="?", choices=["lxc", "storage", "pool", "qemu"])
+    list_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().list_type
+        )(resources)))
+
+    task_subparser = subparsers.add_parser("tasks")
+    task_subparser.set_defaults(func=print_result("json")(future_args(
+        hostname=lambda:parser.parse_args().host,
+        )(tasks)))
+
+    node_subparser = subparsers.add_parser("nodes")
+    node_subparser.set_defaults(func=node_subparser.print_help)
+    node_subparsers = node_subparser.add_subparsers()
+    node_ls_subparser = node_subparsers.add_parser("ls")
+    node_list_subparser = node_subparsers.add_parser("list")
+    node_ls_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host
+        )(nodes)))
+    node_list_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host
+        )(nodes)))
+    node_network_subparser = node_subparsers.add_parser("network")
+    node_network_subparser.add_argument("--node", default=None)
+    node_network_subparser.add_argument("--type", choices=[
+        "bridge", "eth", "alias", "vlan", "OVSBridge", "OVSBond", "OVSPort", "OVSIntPort", "any_bridge"
+        ], default=None)
+    node_network_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().node,
+        lambda:parser.parse_args().type
+        )(networks)))
+    node_storage_subparser = node_subparsers.add_parser("storage")
+    node_storage_subparser.add_argument("--node", default=None)
+    node_storage_subparser.add_argument("--content", default=None)
+    node_storage_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().node,
+        lambda:parser.parse_args().content
+        )(storage)))
+    node_content_subparser = node_subparsers.add_parser("content")
+    node_content_subparser.add_argument("--node", default=None)
+    node_content_subparser.add_argument("--storage", default=None)
+    node_content_subparser.add_argument("--content", default=None)
+    node_content_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().node,
+        lambda:parser.parse_args().storage,
+        lambda:parser.parse_args().content
+        )(content)))
+    
+    pool_subparser = subparsers.add_parser("pools")
+    pool_subparser.set_defaults(func=pool_subparser.print_help)
+    pool_subparsers = pool_subparser.add_subparsers()
+    pool_ls_subparser = pool_subparsers.add_parser("ls")
+    pool_list_subparser = pool_subparsers.add_parser("list")
+    pool_ls_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host
+        )(pools)))
+    pool_list_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host
+        )(pools)))
+
+    lxc_subparser = subparsers.add_parser("lxc")
+    lxc_subparser.add_argument("--node", default=None)
+    lxc_subparsers = lxc_subparser.add_subparsers()
+    lxc_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        node=lambda:parser.parse_args().node,
+        vmid=lambda:parser.parse_args().vmid,
+        )(lxc)))
+    lxc_status_subparser = lxc_subparsers.add_parser("status")
+    lxc_status_subparser.add_argument("op", nargs="?", default="current", choices=["current", "resume", "suspend", "start", "stop", "shutdown"])
+    lxc_status_subparser.add_argument("--vmid", default=None)
+    lxc_status_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        node=lambda:parser.parse_args().node,
+        vmid=lambda:parser.parse_args().vmid,
+        op=lambda:parser.parse_args().op,
+        )(lxc_status)))
+    lxc_create_subparser = lxc_subparsers.add_parser("create-with")
+    lxc_create_subparser.add_argument("template")
+    lxc_create_subparser.add_argument("--wait", default=False, action="store_true")
+    lxc_create_subparser.add_argument("--scale", type=int, default=1)
+    lxc_create_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        node=lambda:parser.parse_args().node,
+        path=lambda:parser.parse_args().template,
+        scale=lambda:parser.parse_args().scale,
+        wait=lambda:parser.parse_args().wait,
+        )(lxc_create)))
+    lxc_delete_subparser = lxc_subparsers.add_parser("delete")
+    lxc_delete_subparser.add_argument("vmid", nargs="?", default=None)
+    lxc_delete_subparser.add_argument("--wait", default=False, action="store_true")
+    lxc_delete_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        node=lambda:parser.parse_args().node,
+        vmid=lambda:parser.parse_args().vmid,
+        wait=lambda:parser.parse_args().wait,
+        )(lxc_delete)))
+
+
+    return parser.parse_args()
+
+
+def main(args):
+    import sys
+    args = parseargs()
+    if args.func: args.func()
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main(parseargs())
