@@ -224,7 +224,7 @@ def content(hostname, node, storage, contenttype=None):
 
 def lxc(hostname, vmid=None, node=None):
     if not node:
-        return {node['id']: lxc(hostname, node['node']) for node in nodes(hostname)}
+        return {node['id']: lxc(hostname, node=node['node']) for node in nodes(hostname)}
     mlogin = has_login(hostname)
     if not mlogin:
         raise Exception("not logined")
@@ -301,6 +301,21 @@ def lxc_delete(hostname, node, vmid, wait=False):
         wait_task(hostname, data['data'])
     return data['data']
 
+def qemu(hostname, node=None, vmid=None):
+    if not node:
+        return {node['id']: lxc(hostname, node=node['node']) for node in nodes(hostname)}
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/nodes/{node}/qemu".format(node=node), params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data']
+
+
 def tasks(hostname):
     mlogin = has_login(hostname)
     if not mlogin:
@@ -340,6 +355,21 @@ def pools(hostname):
     response = get(hostname, "/api2/json/pools", params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
     return data['data']
+
+
+def testurl(hostname, method, path, **kwargs):
+    methods = {"get": get, "post": post, "del": delete, "delete": delete}
+    mlogin = has_login(hostname)
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+
+    response = methods[method](hostname, path, headers=headers, cookies=cookies, **kwargs)
+    return response.json()['data'] if response.status_code < 500 else "server error"
+
 
 def interactive_input(options):
     """
@@ -432,7 +462,6 @@ def parseargs():
     lxc_subparser.set_defaults(func=print_result("json")(future_args(
         lambda:parser.parse_args().host,
         node=lambda:parser.parse_args().node,
-        vmid=lambda:parser.parse_args().vmid,
         )(lxc)))
     lxc_status_subparser = lxc_subparsers.add_parser("status")
     lxc_status_subparser.add_argument("op", nargs="?", default="current", choices=["current", "resume", "suspend", "start", "stop", "shutdown"])
@@ -463,6 +492,28 @@ def parseargs():
         vmid=lambda:parser.parse_args().vmid,
         wait=lambda:parser.parse_args().wait,
         )(lxc_delete)))
+    
+    qemu_subparser = subparsers.add_parser("vm")
+    qemu_subparser.add_argument("--node", default=None)
+    qemu_subparsers = qemu_subparser.add_subparsers()
+    qemu_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        node=lambda:parser.parse_args().node,
+        )(qemu)))
+    qemu_list_subparser = qemu_subparsers.add_parser("list")
+
+    test_subparser = subparsers.add_parser("test")
+    test_subparser.add_argument("method")
+    test_subparser.add_argument("path")
+    test_subparser.add_argument("--param")
+    test_subparser.add_argument("--test")
+    test_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().method,
+        lambda:parser.parse_args().path,
+        )(testurl)))
+
+
 
 
     return parser.parse_args()

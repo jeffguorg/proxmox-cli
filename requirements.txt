@@ -1,4 +1,4 @@
 urllib3==1.21.1
 requests==2.18.1
-redis==2.10.6
+redispy==3.0.0
 PyYAML==3.12
