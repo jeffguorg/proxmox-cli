@@ -1,0 +1,10 @@
+vmid: {vmid}
+hostname: {vmid}-zookeeper-new-{seqid}-dhcp
+ostemplate: "local:vztmpl/centos-7-default_20170504_amd64.tar.xz"
+password: 734778
+pool: GuochaoVMPool
+rootfs: jiuzaigou:100
+cores: 1
+memory: 1024
+swap: 512
+net0: bridge=vmbr0,name=eth0,ip=dhcp

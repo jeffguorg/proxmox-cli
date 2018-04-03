@@ -1,0 +1,6 @@
+venv
+MANIFEST
+README
+.idea
+build
+record.txt

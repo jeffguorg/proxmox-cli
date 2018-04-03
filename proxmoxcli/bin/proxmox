@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import logging
 import urllib3
+logging.basicConfig()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def list_login(hostname):
     import redis
@@ -133,7 +135,7 @@ def login(hostname, username, realm="pve", **kwargs):
         raise Exception(data['message'])
 
 
-def resources(hostname, t=None,p=None):
+def resources(hostname, restype=None,p=None):
     mlogin = has_login(hostname)
     if not mlogin:
         raise Exception("not logined")
@@ -143,7 +145,7 @@ def resources(hostname, t=None,p=None):
     data = {}
     response = get(hostname, "/api2/json/cluster/resources", params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
-    result = [ item for item in data['data'] if ({("type", t)}.issubset(item.items()) or t is None) ]
+    result = [ item for item in data['data'] if ({("type", restype)}.issubset(item.items()) or restype is None) ]
     if response.status_code == 200:
         return result
     else:
@@ -371,33 +373,27 @@ def testurl(hostname, method, path, **kwargs):
     return response.json()['data'] if response.status_code < 500 else "server error"
 
 
-def interactive_input(options):
-    """
-    """
-
 def parseargs():
     import argparse
     import functools
+    import os
 
     parser = argparse.ArgumentParser()
     parser.set_defaults(func=parser.print_help)
-    parser.add_argument("-H", "--host")
+    parser.set_defaults(kwargs=dict())
+    parser.add_argument("-H", "--hostname")
+    parser.add_argument("-p", "--print", default="raw", choices=("raw", "json", "yaml"))
 
     subparsers = parser.add_subparsers()
 
     login_subparser = subparsers.add_parser("login")
     login_subparser.add_argument("username")
-    login_subparser.set_defaults(func=future_args(
-        hostname=lambda:parser.parse_args().host,
-        username=lambda:parser.parse_args().username,
-    )(login))
+    login_subparser.add_argument("password", nargs="?")
+    login_subparser.set_defaults(func=login)
 
     list_subparser = subparsers.add_parser("list")
-    list_subparser.add_argument("list_type", nargs="?", choices=["lxc", "storage", "pool", "qemu"])
-    list_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        lambda:parser.parse_args().list_type
-        )(resources)))
+    list_subparser.add_argument("restype", nargs="?", choices=["lxc", "storage", "pool", "qemu"], metavar="type")
+    list_subparser.set_defaults(func=resources)
 
     task_subparser = subparsers.add_parser("tasks")
     task_subparser.set_defaults(func=print_result("json")(future_args(
@@ -507,22 +503,22 @@ def parseargs():
     test_subparser.add_argument("path")
     test_subparser.add_argument("--param")
     test_subparser.add_argument("--test")
-    test_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        lambda:parser.parse_args().method,
-        lambda:parser.parse_args().path,
-        )(testurl)))
+    test_subparser.set_defaults(func=testurl)
 
+    result = vars(parser.parse_args())
+    for name,env_name in (("host", "PROXMOX_HOST"),):
+        if (name not in result or not result[name]):
+            if env_name in os.environ:
+                result.update({name, os.environ[env_name]})
+            else:
+                logging.warn("{} need to be specified in either command line or environment variable '{}'".format(name, env_name))
 
-
-
-    return parser.parse_args()
+    return result
 
 
 def main(args):
     import sys
-    args = parseargs()
-    if args.func: args.func()
+    if args['func']: args['func'](**args['kwargs'], **args)
     sys.exit(0)
 
 
