@@ -162,6 +162,9 @@ def nextid(hostname):
     data = response.json() if response.status_code == 200 else ""
     return int(data['data'])
 
+def checkid(hostname):
+    """"""
+
 def nodes(hostname):
     mlogin = has_login(hostname)
     if not mlogin:
@@ -265,7 +268,8 @@ def lxc_create(hostname, node, path, scale, wait=False):
         while not status:
             if path.endswith(".yml") or path.endswith("yaml"):
                 import yaml
-                data = yaml.load(open(path).read().format(vmid=vmid, seqid=seqid))
+                data = yaml.load(open(path).read().format(vmid=vmid, seqid=seqid, lxc_next=len(lxc(hostname, node=node))+1))
+
             response = post(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), data=data, cookies=cookies, headers=headers)
             data = response.json()
             if 'data' in data and data['data'] and data['data'].startswith("UPID:") or ('success' in data and data['success']):
@@ -334,7 +338,11 @@ def wait_task(hostname, taskid, interval=1, progress=1):
     if progress:
         print("waiting for task '{}' finish...".format(taskid), end="", flush=True)
     while not finished:
-        task = [task for task in tasks(hostname) if task['upid'] == taskid][0]
+        try:
+            task = [task for task in tasks(hostname) if task['upid'] == taskid][0]
+        except IndexError:
+            print([task for task in tasks(hostname) if task['upid'] == taskid])
+
         if "endtime" in task:
             finished = True
         if not finished:
@@ -356,6 +364,43 @@ def pools(hostname):
     data = response.json() if response.status_code == 200 else ""
     return data['data']
 
+def cluster(hostname):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/cluster", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data']
+
+def cluster_config(hostname, conf="nodes"):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    response = get(hostname, "/api2/json/cluster/config/{}".format(conf), params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data'] if data else {"status_code": response.status_code}
+
+def cluster_resources(hostname, res_type=None):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token.decode()}
+    cookies = {"PVEAuthCookie": ticket.decode()}
+    data = {}
+    if type is not None:
+        data.update({"type": res_type})
+    response = get(hostname, "/api2/json/cluster/resources", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data'] if data else {"status_code": response.status_code}
 
 def testurl(hostname, method, path, **kwargs):
     methods = {"get": get, "post": post, "del": delete, "delete": delete}
@@ -512,6 +557,36 @@ def parseargs():
         lambda:parser.parse_args().method,
         lambda:parser.parse_args().path,
         )(testurl)))
+
+
+    cluster_subparser = subparsers.add_parser("cluster")
+    cluster_subparser.set_defaults(func=cluster_subparser.print_help)
+    cluster_subparsers = cluster_subparser.add_subparsers()
+    cluster_config_subparser = cluster_subparsers.add_parser("config")
+    cluster_config_subparser.set_defaults(func=cluster_config_subparser.print_help)
+    cluster_config_subparsers = cluster_config_subparser.add_subparsers()
+    cluster_config_nodes_subparser = cluster_config_subparsers.add_parser("nodes")
+    cluster_config_nodes_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:"nodes"
+        )(cluster_config)))
+    cluster_config_totem_subparser = cluster_config_subparsers.add_parser("totem")
+    cluster_config_totem_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:"totem"
+        )(cluster_config)))
+    cluster_resources_subparser = cluster_subparsers.add_parser("resources")
+    cluster_resources_subparser.add_argument("-t", "--type", choices=["vm", "storage", "node"])
+    cluster_resources_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().type
+        )(cluster_resources)))
+
+
+    cluster_nextid_subparser = cluster_subparsers.add_parser("nextid")
+    cluster_nextid_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host
+        )(nextid)))
 
 
 
