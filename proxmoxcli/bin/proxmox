@@ -3,11 +3,8 @@ import logging
 import urllib3
 logging.basicConfig()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-def list_login(hostname):
-    import redis
-    rcli = redis.StrictRedis()
-    return rcli.smembers("proxmox:{hostname}".format(hostname=hostname))
 
+VERSION=1
 
 def future_args(*outargs, **outkwargs):
     def ofunc(func, *args, **kwargs):
@@ -35,34 +32,95 @@ def print_result(method):
         return nfunc
     return ofunc
 
+__db__ = None
+def connect_db(path="~/.proxmox.db"):
+    global __db__
+    import sqlite3
+    import os
+    __db__ = __db__ or sqlite3.connect(os.path.expanduser(os.path.expandvars(path)))
+    return __db__
+
+def list_login(hostname):
+    db = connect_db()
+    cursor = db.cursor()
+
+    cursor.execute("select hostname,username,expire from login");
+    results = cursor.fetchall()
+
+    cursor.close()
+    return results
+
+def add_login(hostname, username, ticket, token):
+    db = connect_db()
+    cursor = db.cursor()
+
+    cursor.execute("insert into login(hostname, username, ticket, token) values(?, ?, ?, ?)", [hostname, username, ticket, token])
+    print("insert login", cursor.fetchall())
+    cursor.close()
+    db.commit()
 
 def remove_login(hostname, username):
-    import redis
-    rcli = redis.StrictRedis()
-    rcli.srem("proxmox:{hostname}".format(hostname=hostname), username)
-    rcli.delete("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username))
-    rcli.delete("proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username))
+    db = connect_db()
+    cursor = db.cursor()
 
+    cursor.execute("delete from login where hostname = ? and username = ?", [hostname, username])
+    cursor.fetchall()
+    cursor.close()
+    db.commit()
+
+def update_login(hostname, username, ticket, token):
+    db = connect_db()
+    cursor = db.cursor()
+
+    cursor.execute("update login set expire = DATETIME(CURRENT_TIMESTAMP, '+2 hours'), ticket = ?, token = ? where hostname = ? and username = ?", [ticket, token, hostname, username])
+    cursor.close()
+    db.commit()
 
 def check_login(hostname, username):
-    import redis
-    rcli = redis.StrictRedis()
+    import datetime
+    db = connect_db()
+    cursor = db.cursor()
 
-    if (rcli.sismember("proxmox:{hostname}".format(hostname=hostname), username) and
-            rcli.get("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username)) and
-            rcli.get("proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username))):
-        return ((hostname, username),
-                rcli.get("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username)),
-                rcli.get(
-                    "proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username)))
+    cursor.execute("select expire,ticket,token from login where hostname = ? and username = ?", [hostname, username])
+    results = cursor.fetchall()
+
+    if results:
+        expire, ticket, token = results[0]
+        expire = datetime.datetime.strptime(expire, "%Y-%m-%d %X")
+        now = datetime.datetime.now()
+        if expire < now:
+            return ((hostname, username), ticket, token)
+        else:
+            remove_login(hostname, username)
+            return False
     else:
         remove_login(hostname, username)
-    return False
+        return False
+
+def init_db():
+    db = connect_db()
+    cursor = db.cursor()
+    
+    cursor.executescript("""
+    CREATE table IF NOT EXISTS login(
+        hostname varchar(64) not null, 
+        username varchar(64), 
+        token varchar(128) not null, 
+        ticket varchar(128) not null, 
+        expire timestamp default(DATETIME(CURRENT_TIMESTAMP, '+2 hours')),
+        PRIMARY KEY(`hostname`,`username`)
+    );
+    """)
+    
+    db.commit()
+
+    cursor.close()
+    return db
 
 
 def has_login(hostname):
-    for login in list_login(hostname):
-        res = check_login(hostname, login.decode())
+    for host, username, timestamp in list_login(hostname):
+        res = check_login(hostname, username)
         if not res:
             remove_login(hostname, login)
         else:
@@ -113,10 +171,9 @@ def get(hostname, path, data=None, **kwargs):
 
 
 def login(hostname, username, realm="pve", **kwargs):
-    import redis
-    rcli = redis.StrictRedis()
-    if check_login(hostname, username):
-        password = rcli.get("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username))
+    _has_login = check_login(hostname, username)
+    if _has_login:
+        password = _has_login[1]
     else:
         remove_login(hostname, username)
         import getpass
@@ -125,11 +182,10 @@ def login(hostname, username, realm="pve", **kwargs):
                     data={"username": username, "password": password, "realm": realm})
     data = response.json()
     if response.status_code == 200 and data['success'] == 1:
-        rcli.sadd("proxmox:{hostname}".format(hostname=hostname), username)
-        rcli.setex("proxmox:{hostname}:{username}:ticket".format(hostname=hostname, username=username), 2 * 60 * 60,
-                   data['data']['ticket'])
-        rcli.setex("proxmox:{hostname}:{username}:CSRFPreventionToken".format(hostname=hostname, username=username),
-                   2 * 60 * 60, data['data']['CSRFPreventionToken'])
+        if _has_login:
+            update_login(hostname, username, data['data']['ticket'], data['data']['CSRFPreventionToken'])
+        else:
+            add_login(hostname, username, data['data']['ticket'], data['data']['CSRFPreventionToken'])
         return response.json()
     else:
         raise Exception(data['message'])
@@ -140,8 +196,8 @@ def resources(hostname, restype=None,p=None):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     response = get(hostname, "/api2/json/cluster/resources", params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
@@ -157,20 +213,21 @@ def nextid(hostname):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     response = get(hostname, "/api2/json/cluster/nextid", params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
     return int(data['data'])
+
 
 def nodes(hostname):
     mlogin = has_login(hostname)
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     response = get(hostname, "/api2/json/nodes", params=data, cookies=cookies, headers=headers)
     data = response.json()
@@ -183,8 +240,8 @@ def networks(hostname, node, nettype=None):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     if netttype is not None:
         data.update({"type": nettype})
@@ -199,8 +256,8 @@ def storage(hostname, node, contenttype=None):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     if contenttype is not None:
         data.update({"content": contenttype})
@@ -215,8 +272,8 @@ def content(hostname, node, storage, contenttype=None):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     if contenttype is not None:
         data.update({"content": contenttype})
@@ -231,8 +288,8 @@ def lxc(hostname, vmid=None, node=None):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     response = get(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
@@ -243,8 +300,8 @@ def lxc_status(hostname, node, vmid, op):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     if op == "status":
         response = get(hostname, "/api2/json/nodes/{node}/lxc/{vmid}/status/{op}".format(node=node, vmid=vmid, op=op), params=data, cookies=cookies, headers=headers)
@@ -253,30 +310,39 @@ def lxc_status(hostname, node, vmid, op):
     data = response.json() if response.status_code == 200 else ""
     return data['data'] if data else None
 
-def lxc_create(hostname, node, path, scale, wait=False):
+def lxc_create(hostname, node, path, scale, wait=False, retry=3):
+    import logging
     mlogin = has_login(hostname)
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     results = []
     for seqid in range(1, 1+scale):
         status = 0
-        vmid = nextid(hostname)
-        while not status:
-            if path.endswith(".yml") or path.endswith("yaml"):
-                import yaml
-                data = yaml.load(open(path).read().format(vmid=vmid, seqid=seqid))
-            response = post(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), data=data, cookies=cookies, headers=headers)
-            data = response.json()
-            if 'data' in data and data['data'] and data['data'].startswith("UPID:") or ('success' in data and data['success']):
-                status = 1
-            elif data['success'] == 0 and data['message'].find("already exists"):
-                print("vmid conflict")
-                vmid += 1
-            else:
-                status = -1
+        current_tries = 0
+        while status != 1 and current_tries < retry:
+            vmid = nextid(hostname)
+            if current_tries > 0:
+                ordinal = lambda n: "%d%s" % (n,"tsnrhtdd"[(n/10%10!=1)*(n%10<4)*n%10::4])
+                print("retrying for the {} time".format(ordinal(current_tries)))
+            while not status:
+                if path.endswith(".yml") or path.endswith("yaml"):
+                    import yaml
+                    data = yaml.load(open(path).read().format(vmid=vmid, seqid=seqid, lxc_next=len(lxc(hostname, node=node))+1))
+                logging.debug("Sending request data {} to dest {}".format(data, hostname+"/api2/json/nodes/{node}/lxc".format(node=node)))
+                response = post(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), data=data, cookies=cookies, headers=headers)
+                data = response.json()
+                logging.debug("Get data: {}".format(data))
+                if 'data' in data and data['data'] and data['data'].startswith("UPID:") or ('success' in data and data['success']):
+                    status = 1
+                elif data['success'] == 0 and data['message'].find("already exists"):
+                    print("vmid conflict")
+                    vmid += 1
+                else:
+                    status = -1
+            current_tries += 1
         if status == 1:
             results.append(response.json()['data'])
             if wait:
@@ -290,8 +356,8 @@ def lxc_delete(hostname, node, vmid, wait=False):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     if get(hostname, "/api2/json/nodes/{node}/lxc/{vmid}".format(node=node, vmid=vmid), data=data, cookies=cookies, headers=headers).status_code != 200:
         raise Exception("No such lxc vm")
@@ -310,8 +376,8 @@ def qemu(hostname, node=None, vmid=None):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     response = get(hostname, "/api2/json/nodes/{node}/qemu".format(node=node), params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
@@ -323,8 +389,8 @@ def tasks(hostname):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     response = get(hostname, "/api2/json/cluster/tasks", params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
@@ -336,7 +402,11 @@ def wait_task(hostname, taskid, interval=1, progress=1):
     if progress:
         print("waiting for task '{}' finish...".format(taskid), end="", flush=True)
     while not finished:
-        task = [task for task in tasks(hostname) if task['upid'] == taskid][0]
+        try:
+            task = [task for task in tasks(hostname) if task['upid'] == taskid][0]
+        except IndexError:
+            print([task for task in tasks(hostname) if task['upid'] == taskid])
+
         if "endtime" in task:
             finished = True
         if not finished:
@@ -351,13 +421,50 @@ def pools(hostname):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
     data = {}
     response = get(hostname, "/api2/json/pools", params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
     return data['data']
 
+def cluster(hostname):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
+    data = {}
+    response = get(hostname, "/api2/json/cluster", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data']
+
+def cluster_config(hostname, conf="nodes"):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
+    data = {}
+    response = get(hostname, "/api2/json/cluster/config/{}".format(conf), params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data'] if data else {"status_code": response.status_code}
+
+def cluster_resources(hostname, res_type=None):
+    mlogin = has_login(hostname)
+    if not mlogin:
+        raise Exception("not logined")
+    ((_, username), ticket, token) = mlogin
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
+    data = {}
+    if type is not None:
+        data.update({"type": res_type})
+    response = get(hostname, "/api2/json/cluster/resources", params=data, cookies=cookies, headers=headers)
+    data = response.json() if response.status_code == 200 else ""
+    return data['data'] if data else {"status_code": response.status_code}
 
 def testurl(hostname, method, path, **kwargs):
     methods = {"get": get, "post": post, "del": delete, "delete": delete}
@@ -366,8 +473,8 @@ def testurl(hostname, method, path, **kwargs):
     if not mlogin:
         raise Exception("not logined")
     ((_, username), ticket, token) = mlogin
-    headers = {"CSRFPreventionToken": token.decode()}
-    cookies = {"PVEAuthCookie": ticket.decode()}
+    headers = {"CSRFPreventionToken": token}
+    cookies = {"PVEAuthCookie": ticket}
 
     response = methods[method](hostname, path, headers=headers, cookies=cookies, **kwargs)
     return response.json()['data'] if response.status_code < 500 else "server error"
@@ -380,11 +487,13 @@ def parseargs():
 
     parser = argparse.ArgumentParser()
     parser.set_defaults(func=parser.print_help)
-    parser.set_defaults(kwargs=dict())
-    parser.add_argument("-H", "--hostname")
-    parser.add_argument("-p", "--print", default="raw", choices=("raw", "json", "yaml"))
+    parser.add_argument("-H", "--host")
+    parser.add_argument("-l", "--level", "--log", default="info", choices=["debug", "info", "warn", "error", "fatal"])
 
     subparsers = parser.add_subparsers()
+
+    init_subparser = subparsers.add_parser("init")
+    init_subparser.set_defaults(func=init_db)
 
     login_subparser = subparsers.add_parser("login")
     login_subparser.add_argument("username")
@@ -503,7 +612,43 @@ def parseargs():
     test_subparser.add_argument("path")
     test_subparser.add_argument("--param")
     test_subparser.add_argument("--test")
-    test_subparser.set_defaults(func=testurl)
+    test_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().method,
+        lambda:parser.parse_args().path,
+        )(testurl)))
+
+
+    cluster_subparser = subparsers.add_parser("cluster")
+    cluster_subparser.set_defaults(func=cluster_subparser.print_help)
+    cluster_subparsers = cluster_subparser.add_subparsers()
+    cluster_config_subparser = cluster_subparsers.add_parser("config")
+    cluster_config_subparser.set_defaults(func=cluster_config_subparser.print_help)
+    cluster_config_subparsers = cluster_config_subparser.add_subparsers()
+    cluster_config_nodes_subparser = cluster_config_subparsers.add_parser("nodes")
+    cluster_config_nodes_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:"nodes"
+        )(cluster_config)))
+    cluster_config_totem_subparser = cluster_config_subparsers.add_parser("totem")
+    cluster_config_totem_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:"totem"
+        )(cluster_config)))
+    cluster_resources_subparser = cluster_subparsers.add_parser("resources")
+    cluster_resources_subparser.add_argument("-t", "--type", choices=["vm", "storage", "node"])
+    cluster_resources_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host,
+        lambda:parser.parse_args().type
+        )(cluster_resources)))
+
+
+    cluster_nextid_subparser = cluster_subparsers.add_parser("nextid")
+    cluster_nextid_subparser.set_defaults(func=print_result("json")(future_args(
+        lambda:parser.parse_args().host
+        )(nextid)))
+
+
 
     result = vars(parser.parse_args())
     for name,env_name in (("host", "PROXMOX_HOST"),):
@@ -518,7 +663,11 @@ def parseargs():
 
 def main(args):
     import sys
-    if args['func']: args['func'](**args['kwargs'], **args)
+    import logging
+    args = parseargs()
+    logging.basicConfig(level=logging.getLevelName(args.level.upper()))
+    logging.debug(vars(args))
+    if args.func: args.func()
     sys.exit(0)
 
 
