@@ -1,10 +1,12 @@
 vmid: {vmid}
-hostname: {vmid}-zookeeper-new-{seqid}-dhcp
+hostname: {vmid}-template-{seqid}-172.20.0.{lxc_next}
 ostemplate: "local:vztmpl/centos-7-default_20170504_amd64.tar.xz"
 password: 734778
+ssh-public-keys: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7unWZxUWWZdUQwD4SHG/W9iSKfYTJqIR1elStSrhU2TVEDi8UgTje4oJQQhrVovLFQnm2/vue5R857UJ8Bm6Myo9OKAZHuhoSiVm96lQQwSXil7vFZS1GYKCWYdMpo4LH8Gg5g7xfbJ8ZCHISADwAdfTIsO1Wkfxb5pxRoSi4ouZgHnruMKEFluxI0g/TMcCS9EuBPj2hmE3uIAcXwQArNYZwtdRMWBhZGofTFf26URLVdfNnPATRemN1qskz4oihd5vOQHb0tb1lUMND30YbBCoNNHVT0CjsccL7V7DlvYLC5dv9hBjZghNanRQbIx+0EfJqBKGorN1OaKIZxFyh guochao@guochao-TravelMate-TX50-G2"
 pool: GuochaoVMPool
 rootfs: jiuzaigou:100
 cores: 1
 memory: 1024
 swap: 512
-net0: bridge=vmbr0,name=eth0,ip=dhcp
+net1: bridge=vmbr0,name=eth0,ip=172.20.0.{lxc_next}/24,gw=172.20.0.1
+ostype: centos
