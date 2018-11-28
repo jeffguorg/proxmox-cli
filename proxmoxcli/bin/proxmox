@@ -86,13 +86,12 @@ def check_login(hostname, username):
     if results:
         expire, ticket, token = results[0]
         now = time.time()
-        if expire < now:
+        if expire > now:
             return ((hostname, username), ticket, token)
         else:
             remove_login(hostname, username)
             return False
     else:
-        remove_login(hostname, username)
         return False
 
 def init_db():
@@ -120,7 +119,7 @@ def has_login(hostname):
     for host, username, timestamp in list_login(hostname):
         res = check_login(hostname, username)
         if not res:
-            remove_login(hostname, login)
+            return
         else:
             return res
 
@@ -509,7 +508,7 @@ def parseargs():
 
     task_subparser = subparsers.add_parser("tasks")
     task_subparser.set_defaults(func=print_result("json")(future_args(
-        hostname=lambda:parser.parse_args().host,
+        hostname=lambda:args.host,
         )(tasks)))
 
     node_subparser = subparsers.add_parser("nodes")
@@ -518,10 +517,10 @@ def parseargs():
     node_ls_subparser = node_subparsers.add_parser("ls")
     node_list_subparser = node_subparsers.add_parser("list")
     node_ls_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host
+        lambda:args.host
         )(nodes)))
     node_list_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host
+        lambda:args.host
         )(nodes)))
     node_network_subparser = node_subparsers.add_parser("network")
     node_network_subparser.add_argument("--node", default=None)
@@ -529,27 +528,27 @@ def parseargs():
         "bridge", "eth", "alias", "vlan", "OVSBridge", "OVSBond", "OVSPort", "OVSIntPort", "any_bridge"
         ], default=None)
     node_network_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        lambda:parser.parse_args().node,
-        lambda:parser.parse_args().type
+        lambda:args.host,
+        lambda:args.node,
+        lambda:args.type
         )(networks)))
     node_storage_subparser = node_subparsers.add_parser("storage")
     node_storage_subparser.add_argument("--node", default=None)
     node_storage_subparser.add_argument("--content", default=None)
     node_storage_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        lambda:parser.parse_args().node,
-        lambda:parser.parse_args().content
+        lambda:args.host,
+        lambda:args.node,
+        lambda:args.content
         )(storage)))
     node_content_subparser = node_subparsers.add_parser("content")
     node_content_subparser.add_argument("--node", default=None)
     node_content_subparser.add_argument("--storage", default=None)
     node_content_subparser.add_argument("--content", default=None)
     node_content_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        lambda:parser.parse_args().node,
-        lambda:parser.parse_args().storage,
-        lambda:parser.parse_args().content
+        lambda:args.host,
+        lambda:args.node,
+        lambda:args.storage,
+        lambda:args.content
         )(content)))
     
     pool_subparser = subparsers.add_parser("pools")
@@ -558,55 +557,55 @@ def parseargs():
     pool_ls_subparser = pool_subparsers.add_parser("ls")
     pool_list_subparser = pool_subparsers.add_parser("list")
     pool_ls_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host
+        lambda:args.host
         )(pools)))
     pool_list_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host
+        lambda:args.host
         )(pools)))
 
     lxc_subparser = subparsers.add_parser("lxc")
     lxc_subparser.add_argument("--node", default=None)
     lxc_subparsers = lxc_subparser.add_subparsers()
     lxc_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        node=lambda:parser.parse_args().node,
+        hostname=lambda:args.host,
+        node=lambda:args.node,
         )(lxc)))
     lxc_status_subparser = lxc_subparsers.add_parser("status")
     lxc_status_subparser.add_argument("op", nargs="?", default="current", choices=["current", "resume", "suspend", "start", "stop", "shutdown"])
     lxc_status_subparser.add_argument("--vmid", default=None)
     lxc_status_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        node=lambda:parser.parse_args().node,
-        vmid=lambda:parser.parse_args().vmid,
-        op=lambda:parser.parse_args().op,
+        lambda:args.host,
+        node=lambda:args.node,
+        vmid=lambda:args.vmid,
+        op=lambda:args.op,
         )(lxc_status)))
     lxc_create_subparser = lxc_subparsers.add_parser("create-with")
     lxc_create_subparser.add_argument("template")
     lxc_create_subparser.add_argument("--wait", default=False, action="store_true")
     lxc_create_subparser.add_argument("--scale", type=int, default=1)
     lxc_create_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        node=lambda:parser.parse_args().node,
-        path=lambda:parser.parse_args().template,
-        scale=lambda:parser.parse_args().scale,
-        wait=lambda:parser.parse_args().wait,
+        lambda:args.host,
+        node=lambda:args.node,
+        path=lambda:args.template,
+        scale=lambda:args.scale,
+        wait=lambda:args.wait,
         )(lxc_create)))
     lxc_delete_subparser = lxc_subparsers.add_parser("delete")
     lxc_delete_subparser.add_argument("vmid", nargs="?", default=None)
     lxc_delete_subparser.add_argument("--wait", default=False, action="store_true")
     lxc_delete_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        node=lambda:parser.parse_args().node,
-        vmid=lambda:parser.parse_args().vmid,
-        wait=lambda:parser.parse_args().wait,
+        lambda:args.host,
+        node=lambda:args.node,
+        vmid=lambda:args.vmid,
+        wait=lambda:args.wait,
         )(lxc_delete)))
     
     qemu_subparser = subparsers.add_parser("vm")
     qemu_subparser.add_argument("--node", default=None)
     qemu_subparsers = qemu_subparser.add_subparsers()
     qemu_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        node=lambda:parser.parse_args().node,
+        lambda:args.host,
+        node=lambda:args.node,
         )(qemu)))
     qemu_list_subparser = qemu_subparsers.add_parser("list")
 
@@ -616,9 +615,9 @@ def parseargs():
     test_subparser.add_argument("--param")
     test_subparser.add_argument("--test")
     test_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        lambda:parser.parse_args().method,
-        lambda:parser.parse_args().path,
+        lambda:args.host,
+        lambda:args.method,
+        lambda:args.path,
         )(testurl)))
 
 
@@ -630,25 +629,25 @@ def parseargs():
     cluster_config_subparsers = cluster_config_subparser.add_subparsers()
     cluster_config_nodes_subparser = cluster_config_subparsers.add_parser("nodes")
     cluster_config_nodes_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
+        lambda:args.host,
         lambda:"nodes"
         )(cluster_config)))
     cluster_config_totem_subparser = cluster_config_subparsers.add_parser("totem")
     cluster_config_totem_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
+        lambda:args.host,
         lambda:"totem"
         )(cluster_config)))
     cluster_resources_subparser = cluster_subparsers.add_parser("resources")
     cluster_resources_subparser.add_argument("-t", "--type", choices=["vm", "storage", "node"])
     cluster_resources_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host,
-        lambda:parser.parse_args().type
+        lambda:args.host,
+        lambda:args.type
         )(cluster_resources)))
 
 
     cluster_nextid_subparser = cluster_subparsers.add_parser("nextid")
     cluster_nextid_subparser.set_defaults(func=print_result("json")(future_args(
-        lambda:parser.parse_args().host
+        lambda:args.host
         )(nextid)))
 
 
