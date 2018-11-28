@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import logging
 import urllib3
+import time
 logging.basicConfig()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -44,7 +45,7 @@ def list_login(hostname):
     db = connect_db()
     cursor = db.cursor()
 
-    cursor.execute("select hostname,username,expire from login");
+    cursor.execute("select hostname,username,expire from login")
     results = cursor.fetchall()
 
     cursor.close()
@@ -54,8 +55,7 @@ def add_login(hostname, username, ticket, token):
     db = connect_db()
     cursor = db.cursor()
 
-    cursor.execute("insert into login(hostname, username, ticket, token) values(?, ?, ?, ?)", [hostname, username, ticket, token])
-    print("insert login", cursor.fetchall())
+    cursor.execute("insert into login(hostname, username, ticket, token, expire) values(?, ?, ?, ?, ?)", [hostname, username, ticket, token, int(time.time() + 7200)])
     cursor.close()
     db.commit()
 
@@ -72,12 +72,11 @@ def update_login(hostname, username, ticket, token):
     db = connect_db()
     cursor = db.cursor()
 
-    cursor.execute("update login set expire = DATETIME(CURRENT_TIMESTAMP, '+2 hours'), ticket = ?, token = ? where hostname = ? and username = ?", [ticket, token, hostname, username])
+    cursor.execute("update login set expire = ?, ticket = ?, token = ? where hostname = ? and username = ?", [int(time.time()+7200), ticket, token, hostname, username])
     cursor.close()
     db.commit()
 
 def check_login(hostname, username):
-    import datetime
     db = connect_db()
     cursor = db.cursor()
 
@@ -86,8 +85,7 @@ def check_login(hostname, username):
 
     if results:
         expire, ticket, token = results[0]
-        expire = datetime.datetime.strptime(expire, "%Y-%m-%d %X")
-        now = datetime.datetime.now()
+        now = time.time()
         if expire < now:
             return ((hostname, username), ticket, token)
         else:
@@ -107,7 +105,7 @@ def init_db():
         username varchar(64), 
         token varchar(128) not null, 
         ticket varchar(128) not null, 
-        expire timestamp default(DATETIME(CURRENT_TIMESTAMP, '+2 hours')),
+        expire int not null,
         PRIMARY KEY(`hostname`,`username`)
     );
     """)
@@ -177,7 +175,7 @@ def login(hostname, username, realm="pve", **kwargs):
     else:
         remove_login(hostname, username)
         import getpass
-        password = getpass.getpass()
+        password = kwargs.get("password") or getpass.getpass()
     response = post(hostname, "/api2/extjs/access/ticket",
                     data={"username": username, "password": password, "realm": realm})
     data = response.json()
@@ -484,6 +482,7 @@ def parseargs():
     import argparse
     import functools
     import os
+    global args
 
     parser = argparse.ArgumentParser()
     parser.set_defaults(func=parser.print_help)
@@ -498,7 +497,11 @@ def parseargs():
     login_subparser = subparsers.add_parser("login")
     login_subparser.add_argument("username")
     login_subparser.add_argument("password", nargs="?")
-    login_subparser.set_defaults(func=login)
+    login_subparser.set_defaults(func=future_args(
+        hostname=lambda:args.host,
+        username=lambda:args.username,
+        password=lambda:args.password
+        )(login))
 
     list_subparser = subparsers.add_parser("list")
     list_subparser.add_argument("restype", nargs="?", choices=["lxc", "storage", "pool", "qemu"], metavar="type")
@@ -650,13 +653,14 @@ def parseargs():
 
 
 
-    result = vars(parser.parse_args())
-    for name,env_name in (("host", "PROXMOX_HOST"),):
-        if (name not in result or not result[name]):
+    result = parser.parse_args()
+    for name,env_name in (("host", "PROXMOX_HOST"), ("password", "PASSWORD")):
+        if (not hasattr(result, name) or not getattr(result, name)):
             if env_name in os.environ:
-                result.update({name, os.environ[env_name]})
+                setattr(result, name, os.environ[env_name])
             else:
                 logging.warn("{} need to be specified in either command line or environment variable '{}'".format(name, env_name))
+    args = result
 
     return result
 
