@@ -5,7 +5,8 @@ import time
 logging.basicConfig()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION=1
+VERSION = 1
+
 
 def future_args(*outargs, **outkwargs):
     def ofunc(func, *args, **kwargs):
@@ -21,6 +22,7 @@ def future_args(*outargs, **outkwargs):
         return nfunc
     return ofunc
 
+
 def print_result(method):
     def ofunc(func, *args, **kwargs):
         def nfunc(*args, **kwargs):
@@ -33,13 +35,19 @@ def print_result(method):
         return nfunc
     return ofunc
 
+
 __db__ = None
+
+
 def connect_db(path="~/.proxmox.db"):
     global __db__
     import sqlite3
     import os
-    __db__ = __db__ or sqlite3.connect(os.path.expanduser(os.path.expandvars(path)))
+    __db__ = __db__ or sqlite3.connect(
+        os.path.expanduser(os.path.expandvars(path))
+    )
     return __db__
+
 
 def list_login(hostname):
     db = connect_db()
@@ -51,22 +59,31 @@ def list_login(hostname):
     cursor.close()
     return results
 
+
 def add_login(hostname, username, ticket, token):
     db = connect_db()
     cursor = db.cursor()
 
-    cursor.execute("insert into login(hostname, username, ticket, token, expire) values(?, ?, ?, ?, ?)", [hostname, username, ticket, token, int(time.time() + 7200)])
+    cursor.execute("""insert into
+                login(hostname, username, ticket, token, expire)
+                values(?, ?, ?, ?, ?)""", [
+                    hostname, username, ticket, token, int(time.time() + 7200)
+                ]
+    )
     cursor.close()
     db.commit()
+
 
 def remove_login(hostname, username):
     db = connect_db()
     cursor = db.cursor()
 
-    cursor.execute("delete from login where hostname = ? and username = ?", [hostname, username])
+    cursor.execute("delete from login where hostname = ? and username = ?",
+                   [hostname, username])
     cursor.fetchall()
     cursor.close()
     db.commit()
+
 
 def update_login(hostname, username, ticket, token):
     db = connect_db()
@@ -75,6 +92,7 @@ def update_login(hostname, username, ticket, token):
     cursor.execute("update login set expire = ?, ticket = ?, token = ? where hostname = ? and username = ?", [int(time.time()+7200), ticket, token, hostname, username])
     cursor.close()
     db.commit()
+
 
 def check_login(hostname, username):
     db = connect_db()
@@ -94,10 +112,11 @@ def check_login(hostname, username):
     else:
         return False
 
+
 def init_db():
     db = connect_db()
     cursor = db.cursor()
-    
+
     cursor.executescript("""
     CREATE table IF NOT EXISTS login(
         hostname varchar(64) not null, 
@@ -108,7 +127,7 @@ def init_db():
         PRIMARY KEY(`hostname`,`username`)
     );
     """)
-    
+
     db.commit()
 
     cursor.close()
@@ -123,6 +142,7 @@ def has_login(hostname):
         else:
             return res
 
+
 def delete(hostname, path, data=None, json=None, **kwargs):
     import requests
     if not hostname.startswith("https://"):
@@ -136,6 +156,7 @@ def delete(hostname, path, data=None, json=None, **kwargs):
     if "verify" not in kwargs:
         kwargs.update({"verify": False})
     return requests.delete(url, data=data, json=json, **kwargs)
+
 
 def post(hostname, path, data=None, json=None, **kwargs):
     import requests
@@ -188,7 +209,7 @@ def login(hostname, username, realm="pve", **kwargs):
         raise Exception(data['message'])
 
 
-def resources(hostname, restype=None,p=None):
+def resources(hostname, restype=None, p=None):
     mlogin = has_login(hostname)
     if not mlogin:
         raise Exception("not logined")
@@ -198,7 +219,7 @@ def resources(hostname, restype=None,p=None):
     data = {}
     response = get(hostname, "/api2/json/cluster/resources", params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
-    result = [ item for item in data['data'] if ({("type", restype)}.issubset(item.items()) or restype is None) ]
+    result = [item for item in data['data'] if ({("type", restype)}.issubset(item.items()) or restype is None)]
     if response.status_code == 200:
         return result
     else:
@@ -230,6 +251,7 @@ def nodes(hostname):
     data = response.json()
     return data['data']
 
+
 def networks(hostname, node, nettype=None):
     if not node:
         return {node['id']: networks(hostname, node['node'], nettype) for node in nodes(hostname)}
@@ -245,6 +267,7 @@ def networks(hostname, node, nettype=None):
     response = get(hostname, "/api2/json/nodes/{node}/network".format(node=node), params=data, cookies=cookies, headers=headers)
     data = response.json()
     return data['data']
+
 
 def storage(hostname, node, contenttype=None):
     if not node:
@@ -262,6 +285,7 @@ def storage(hostname, node, contenttype=None):
     data = response.json()
     return data['data']
 
+
 def content(hostname, node, storage, contenttype=None):
     if not (node and storage):
         raise Exception
@@ -278,6 +302,7 @@ def content(hostname, node, storage, contenttype=None):
     data = response.json()
     return data['data']
 
+
 def lxc(hostname, vmid=None, node=None):
     if not node:
         return {node['id']: lxc(hostname, node=node['node']) for node in nodes(hostname)}
@@ -291,6 +316,7 @@ def lxc(hostname, vmid=None, node=None):
     response = get(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), params=data, cookies=cookies, headers=headers)
     data = response.json() if response.status_code == 200 else ""
     return data['data']
+
 
 def lxc_status(hostname, node, vmid, op):
     mlogin = has_login(hostname)
@@ -307,7 +333,8 @@ def lxc_status(hostname, node, vmid, op):
     data = response.json() if response.status_code == 200 else ""
     return data['data'] if data else None
 
-def lxc_create(hostname, node, path, scale, wait=False, retry=3):
+
+def lxc_create(hostname, node, path, scale, name=None, wait=False, start=False, retry=3):
     import logging
     mlogin = has_login(hostname)
     if not mlogin:
@@ -322,12 +349,14 @@ def lxc_create(hostname, node, path, scale, wait=False, retry=3):
         while status != 1 and current_tries < retry:
             vmid = nextid(hostname)
             if current_tries > 0:
-                ordinal = lambda n: "%d%s" % (n,"tsnrhtdd"[(n/10%10!=1)*(n%10<4)*n%10::4])
+                ordinal = lambda n: "%d%s" % (n, "tsnrhtdd"[(n/10%10!=1)*(n%10<4)*n%10::4])
                 print("retrying for the {} time".format(ordinal(current_tries)))
             while not status:
                 if path.endswith(".yml") or path.endswith("yaml"):
                     import yaml
                     data = yaml.load(open(path).read().format(vmid=vmid, seqid=seqid, lxc_next=len(lxc(hostname, node=node))+1))
+                if name:
+                    data['hostname'] = ('{vmid}-' + name + '-{seqid}-172.20.0.{lxc_next}').format(vmid=vmid, seqid=seqid, lxc_next=len(lxc(hostname, node=node))+1)
                 logging.debug("Sending request data {} to dest {}".format(data, hostname+"/api2/json/nodes/{node}/lxc".format(node=node)))
                 response = post(hostname, "/api2/json/nodes/{node}/lxc".format(node=node), data=data, cookies=cookies, headers=headers)
                 data = response.json()
@@ -342,11 +371,15 @@ def lxc_create(hostname, node, path, scale, wait=False, retry=3):
             current_tries += 1
         if status == 1:
             results.append(response.json()['data'])
-            if wait:
+            if wait or start:
                 wait_task(hostname, response.json()['data'])
+                if start:
+                    print("ct", vmid, "started")
+                    lxc_status(hostname, node, vmid, "start")
         else:
             results.append(response.json()['message'])
     return results
+
 
 def lxc_delete(hostname, node, vmid, wait=False):
     mlogin = has_login(hostname)
@@ -493,6 +526,12 @@ def parseargs():
     init_subparser = subparsers.add_parser("init")
     init_subparser.set_defaults(func=init_db)
 
+    nextid_subparser = subparsers.add_parser("nextid")
+    nextid_subparser.set_defaults(func=print_result("json")(future_args(
+        hostname=lambda:args.host,
+        )(nextid)))
+    
+
     login_subparser = subparsers.add_parser("login")
     login_subparser.add_argument("username")
     login_subparser.add_argument("password", nargs="?")
@@ -583,12 +622,16 @@ def parseargs():
     lxc_create_subparser.add_argument("template")
     lxc_create_subparser.add_argument("--wait", default=False, action="store_true")
     lxc_create_subparser.add_argument("--scale", type=int, default=1)
+    lxc_create_subparser.add_argument("--name", default=None)
+    lxc_create_subparser.add_argument("--start", default=False, action="store_true")
     lxc_create_subparser.set_defaults(func=print_result("json")(future_args(
         lambda:args.host,
         node=lambda:args.node,
         path=lambda:args.template,
         scale=lambda:args.scale,
         wait=lambda:args.wait,
+        start=lambda:args.start,
+        name=lambda:args.name,
         )(lxc_create)))
     lxc_delete_subparser = lxc_subparsers.add_parser("delete")
     lxc_delete_subparser.add_argument("vmid", nargs="?", default=None)
@@ -667,7 +710,6 @@ def parseargs():
 def main(args):
     import sys
     import logging
-    args = parseargs()
     logging.basicConfig(level=logging.getLevelName(args.level.upper()))
     logging.debug(vars(args))
     if args.func: args.func()
